@@ -159,7 +159,7 @@ def select_for_day(raw: List[Dict], min_count: int, max_count: int, ind_low: flo
     return selected[:total]
 
 def save_csv(month_label: str, per_day: Dict[int, List[Dict]], outfile: str):
-    with open(outfile, "w", newline="", encoding="utf-8") as f):
+    with open(outfile, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["Date", "Title", "Description", "Source"])
         for day in sorted(per_day.keys()):
