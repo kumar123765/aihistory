@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 import argparse
 import csv
-import os
 import random
 import re
 import time
@@ -11,7 +10,7 @@ import requests
 from bs4 import BeautifulSoup
 
 BASE_URL = "https://en.wikipedia.org/wiki/{month}_{day}"
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; HistMonthBot/2.0)"}
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; HistMonthBot/2.1)"}
 SESSION = requests.Session()
 
 VALID_MONTHS = [
@@ -160,7 +159,7 @@ def select_for_day(raw: List[Dict], min_count: int, max_count: int, ind_low: flo
     return selected[:total]
 
 def save_csv(month_label: str, per_day: Dict[int, List[Dict]], outfile: str):
-    with open(outfile, "w", newline="", encoding="utf-8") as f:
+    with open(outfile, "w", newline="", encoding="utf-8") as f):
         w = csv.writer(f)
         w.writerow(["Date", "Title", "Description", "Source"])
         for day in sorted(per_day.keys()):
@@ -192,21 +191,17 @@ def run_month(month_name: str, min_count: int, max_count: int, india_low: float,
 
 def main():
     ap = argparse.ArgumentParser(description="Build monthly historical events CSV with India:Global mix (cloud-friendly).")
-    ap.add_argument("--month", type=str, default=os.getenv("MONTH"), help="Month name or number (e.g., 'august' or '8').")
-    ap.add_argument("--min", type=int, default=int(os.getenv("MIN_PER_DAY", "20")), help="Minimum events per day.")
-    ap.add_argument("--max", type=int, default=int(os.getenv("MAX_PER_DAY", "25")), help="Maximum events per day.")
-    ap.add_argument("--india-low", type=float, default=float(os.getenv("INDIA_LOW", "0.60")), help="Lower bound of India share.")
-    ap.add_argument("--india-high", type=float, default=float(os.getenv("INDIA_HIGH", "0.70")), help="Upper bound of India share.")
-    ap.add_argument("--include-births", action="store_true", default=os.getenv("INCLUDE_BIRTHS", "false").lower()=="true")
-    ap.add_argument("--include-deaths", action="store_true", default=os.getenv("INCLUDE_DEATHS", "false").lower()=="true")
-    ap.add_argument("--outfile", type=str, default=os.getenv("OUTFILE", "events.csv"), help="Output CSV filename.")
+    ap.add_argument("--month", type=str, required=True, help="Month name or number (e.g., 'august' or '8').")
+    ap.add_argument("--min", type=int, default=20, help="Minimum events per day (default 20).")
+    ap.add_argument("--max", type=int, default=25, help="Maximum events per day (default 25).")
+    ap.add_argument("--india-low", type=float, default=0.60, help="Lower bound of India share (default 0.60).")
+    ap.add_argument("--india-high", type=float, default=0.70, help="Upper bound of India share (default 0.70).")
+    ap.add_argument("--include-births", action="store_true", help="Include notable births (default off).")
+    ap.add_argument("--include-deaths", action="store_true", help="Include notable deaths (default off).")
+    ap.add_argument("--outfile", type=str, default="events.csv", help="Output CSV filename.")
     args = ap.parse_args()
-
-    if not args.month:
-        raise SystemExit("[ERROR] Provide --month or set MONTH env var (e.g., 'august' or '8').")
 
     run_month(args.month, args.min, args.max, args.india_low, args.india_high, args.include_births, args.include_deaths, args.outfile)
 
 if __name__ == "__main__":
     main()
-
