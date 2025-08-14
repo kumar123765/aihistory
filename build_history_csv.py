@@ -5,12 +5,12 @@ import csv
 import random
 import re
 import time
-from typing import List, Dict
+from typing import List, Dict, Optional
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 BASE_URL = "https://en.wikipedia.org/wiki/{month}_{day}"
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; HistMonthBot/2.1)"}
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; HistMonthBot/2.2)"}
 SESSION = requests.Session()
 
 VALID_MONTHS = [
@@ -42,7 +42,7 @@ def normalize_month(m: str) -> str:
             return v
     return m.title()
 
-def http_get(url: str, tries: int = 3, backoff: float = 1.0):
+def http_get(url: str, tries: int = 4, backoff: float = 1.0) -> Optional[requests.Response]:
     for i in range(tries):
         try:
             resp = SESSION.get(url, headers=HEADERS, timeout=30)
@@ -54,55 +54,69 @@ def http_get(url: str, tries: int = 3, backoff: float = 1.0):
         time.sleep(backoff * (i + 1))
     return None
 
+def _collect_list_items_after_heading(heading: Tag) -> List[Tag]:
+    """
+    From the heading node (h2/h3), walk forward through siblings until the next h2/h3.
+    Collect every <li> from any <ul> encountered (works even if <p> or <div> is between).
+    """
+    items: List[Tag] = []
+    for sib in heading.next_siblings:
+        if isinstance(sib, Tag):
+            # stop at the next heading
+            if sib.name in ("h2", "h3"):
+                break
+            # collect from any ULs (direct or nested)
+            for ul in sib.find_all("ul", recursive=True):
+                for li in ul.find_all("li", recursive=False):
+                    items.append(li)
+    return items
+
 def fetch_day_sections(month: str, day: int, include_births: bool, include_deaths: bool) -> List[Dict]:
-    """Scrape Events (+ optional Births/Deaths) from Wikipedia Month-Day page."""
+    """Scrape Events (+ optional Births/Deaths) from Wikipedia Month–Day page (robust traversal)."""
     url = BASE_URL.format(month=month, day=day)
     resp = http_get(url)
     if not resp:
         return []
-    soup = BeautifulSoup(resp.text, "html.parser")
-    out = []
-    flags = {"events": True, "births": include_births, "deaths": include_deaths}
-    found_any = False
 
-    for h in soup.find_all(["h2","h3"]):
+    soup = BeautifulSoup(resp.text, "html.parser")
+    want = {"events": True, "births": include_births, "deaths": include_deaths}
+    out: List[Dict] = []
+    total_found = 0
+
+    for h in soup.find_all(["h2", "h3"]):
         span = h.find("span", class_="mw-headline")
         if not span:
             continue
-        name = span.get_text(strip=True).lower()
-        if name in flags and flags[name]:
-            found_any = True
-            ul = h.find_next_sibling("ul")
-            while ul and ul.name == "ul":
-                for li in ul.find_all("li", recursive=False):
-                    txt = " ".join(li.get_text(" ", strip=True).split())
-                    if not txt:
-                        continue
-                    low = txt.lower()
-                    if any(term in low for term in EXCLUDE_OBSERVANCES):
-                        continue  # drop observances/festivals
-                    # most items start with "YYYY – description"
-                    m = re.match(r"^(\d{1,4})\s*[–-]\s*(.*)$", txt)
-                    desc = m.group(2) if m else txt
-                    # title from first anchor if present
-                    a = li.find("a")
-                    href = url
-                    title = ""
-                    if a and a.has_attr("href"):
-                        href = a["href"]
-                        if href.startswith("/"):
-                            href = "https://en.wikipedia.org" + href
-                        title = a.get_text(strip=True)
-                    if not title:
-                        title = desc.split(".")[0][:120]
-                    out.append({"title": title, "desc": desc, "src": href})
-                ns = ul.find_next_sibling()
-                if ns and ns.name == "ul":
-                    ul = ns
-                else:
-                    break
-    if not found_any:
-        print(f"[WARN] No Events/Births/Deaths sections found on {url}")
+        sec_name = span.get_text(strip=True).lower()
+        if sec_name in want and want[sec_name]:
+            lis = _collect_list_items_after_heading(h)
+            total_found += len(lis)
+            for li in lis:
+                txt = " ".join(li.get_text(" ", strip=True).split())
+                if not txt:
+                    continue
+                low = txt.lower()
+                if any(term in low for term in EXCLUDE_OBSERVANCES):
+                    continue  # drop observances/festivals
+
+                # Most items are "YYYY – description" or "YYYY - description"
+                m = re.match(r"^(\d{1,4})\s*[–-]\s*(.*)$", txt)
+                desc = m.group(2) if m else txt
+
+                # Prefer the first link as a compact title; fall back to first sentence
+                a = li.find("a")
+                href = url
+                title = ""
+                if a and a.has_attr("href"):
+                    href = a["href"]
+                    if href.startswith("/"):
+                        href = "https://en.wikipedia.org" + href
+                    title = a.get_text(strip=True)
+                if not title:
+                    title = desc.split(".")[0][:120]
+                out.append({"title": title, "desc": desc, "src": href})
+
+    print(f"[INFO] {month} {day:02d}: raw items found={total_found}, kept={len(out)}")
     return out
 
 def india_score(text: str) -> float:
@@ -110,13 +124,13 @@ def india_score(text: str) -> float:
     score = 0.0
     if any(k in low for k in INDIA_KEYWORDS):
         score += 50.0
-    score += min(len(text) / 200.0, 10.0)
+    score += min(len(text) / 200.0, 10.0)  # slight bias toward informative lines
     return score
 
 def select_for_day(raw: List[Dict], min_count: int, max_count: int, ind_low: float, ind_high: float) -> List[Dict]:
     if not raw:
         return []
-    # basic dedupe by (title, desc)
+    # Deduplicate by (title, desc)
     seen = set()
     items = []
     for r in raw:
@@ -126,8 +140,10 @@ def select_for_day(raw: List[Dict], min_count: int, max_count: int, ind_low: flo
         seen.add(key)
         s = india_score(f"{r['title']} {r['desc']}")
         items.append({**r, "score": s, "is_india": s >= 50.0})
-    # sort by India-ness, then score
+
+    # Sort by India-ness then score
     items.sort(key=lambda x: (x["is_india"], x["score"]), reverse=True)
+
     total = max(min_count, min(max_count, len(items)))
     india_target_low = int(total * ind_low)
     india_target_high = int(total * ind_high)
@@ -135,13 +151,13 @@ def select_for_day(raw: List[Dict], min_count: int, max_count: int, ind_low: flo
     india_items = [i for i in items if i["is_india"]]
     global_items = [i for i in items if not i["is_india"]]
 
-    selected = []
+    selected: List[Dict] = []
     selected.extend(india_items[:india_target_high])
     need = total - len(selected)
     if need > 0:
         selected.extend(global_items[:need])
 
-    # ensure lower India bound
+    # Ensure lower India bound
     ind_count = sum(1 for i in selected if i["is_india"])
     if ind_count < india_target_low and len(india_items) > ind_count:
         replace = india_target_low - ind_count
@@ -154,7 +170,6 @@ def select_for_day(raw: List[Dict], min_count: int, max_count: int, ind_low: flo
                 replace -= 1
             gi -= 1
 
-    # final order
     selected.sort(key=lambda x: (x["is_india"], x["score"]), reverse=True)
     return selected[:total]
 
@@ -177,7 +192,9 @@ def run_month(month_name: str, min_count: int, max_count: int, india_low: float,
     if month_label not in VALID_MONTHS:
         raise SystemExit(f"[ERROR] Unknown month '{month_name}'. Use names like 'August' or numbers 1-12.")
     print(f"[INFO] Building {month_label}: min={min_count}, max={max_count}, India={india_low:.0%}-{india_high:.0%}, births={include_births}, deaths={include_deaths}")
-    days_in_month = [31, 29 if month_label == "February" else 31, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][VALID_MONTHS.index(month_label)]
+    # Days-per-month table (Aug=31)
+    days_per_month = [31, 29 if month_label == "February" else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    days_in_month = days_per_month[VALID_MONTHS.index(month_label)]
     per_day = {}
     for day in range(1, days_in_month + 1):
         raw = fetch_day_sections(month_label, day, include_births, include_deaths)
@@ -185,12 +202,13 @@ def run_month(month_name: str, min_count: int, max_count: int, india_low: float,
             print(f"[WARN] No data for {month_label} {day}")
             continue
         chosen = select_for_day(raw, min_count, max_count, india_low, india_high)
+        print(f"[INFO] {month_label} {day:02d}: selected={len(chosen)} (target {min_count}-{max_count})")
         per_day[day] = chosen
-        time.sleep(0.4 + random.random()*0.3)  # polite delay
+        time.sleep(0.4 + random.random()*0.3)  # polite delay to avoid rate limits
     save_csv(month_label, per_day, outfile)
 
 def main():
-    ap = argparse.ArgumentParser(description="Build monthly historical events CSV with India:Global mix (cloud-friendly).")
+    ap = argparse.ArgumentParser(description="Build monthly historical events CSV with India:Global mix (robust parser).")
     ap.add_argument("--month", type=str, required=True, help="Month name or number (e.g., 'august' or '8').")
     ap.add_argument("--min", type=int, default=20, help="Minimum events per day (default 20).")
     ap.add_argument("--max", type=int, default=25, help="Maximum events per day (default 25).")
@@ -200,7 +218,6 @@ def main():
     ap.add_argument("--include-deaths", action="store_true", help="Include notable deaths (default off).")
     ap.add_argument("--outfile", type=str, default="events.csv", help="Output CSV filename.")
     args = ap.parse_args()
-
     run_month(args.month, args.min, args.max, args.india_low, args.india_high, args.include_births, args.include_deaths, args.outfile)
 
 if __name__ == "__main__":
